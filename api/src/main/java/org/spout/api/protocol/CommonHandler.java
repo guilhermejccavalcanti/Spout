@@ -28,11 +28,9 @@ package org.spout.api.protocol;
 
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Level;
-
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
-
 import org.spout.api.Client;
 import org.spout.api.Engine;
 import org.spout.api.Platform;
@@ -43,121 +41,103 @@ import org.spout.api.Spout;
  * A {@link SimpleChannelUpstreamHandler} which processes incoming network events.
  */
 public class CommonHandler extends SimpleChannelInboundHandler<Message> {
-	/**
+
+    /**
 	 * The server.
 	 */
-	private final Engine engine;
-	/**
+    private final Engine engine;
+
+    /**
 	 * The associated session
 	 */
-	private final AtomicReference<Session> session = new AtomicReference<>(null);
-	/**
+    private final AtomicReference<Session> session = new AtomicReference<>(null);
+
+    /**
 	 * Indicates if it is an upstream channel pipeline
 	 */
-	private final boolean onClient;
-	private final CommonDecoder decoder;
-	private final CommonEncoder encoder;
+    private final boolean onClient;
 
-	/**
-	 * Creates a new network event handler.
-	 *
-	 * @param engine The engine.
-	 * @param upstream If the connections are going to the server
-	 */
-	public CommonHandler(CommonEncoder encoder, CommonDecoder decoder) {
-		if (Spout.getPlatform() == Platform.CLIENT) {
-			this.engine = (Client) Spout.getEngine();
-			this.onClient = true;
-		} else {
-			this.engine = (Server) Spout.getEngine();
-			this.onClient = false;
-		}
-		this.encoder = encoder;
-		this.decoder = decoder;
-	}
+    private final CommonDecoder decoder;
 
-	@Override
-	public void channelActive(ChannelHandlerContext ctx) {
-		final Channel c = ctx.channel();
-		// ctx.getPipeline().addBefore("2", "messagePrinter", new MessagePrintingHandler());
-		if (onClient) {
-			// Client
-			engine.getLogger().info("Upstream channel connected: " + c + ".");
-		} else {
-			// Server
-			try {
-				Server server = (Server) engine;
-				server.getChannelGroup().add(c);
-				Session session = server.newSession(c);
-				server.getSessionRegistry().add(session);
-				setSession(session);
-			} catch (Exception ex) {
-				ex.printStackTrace();
-				throw new RuntimeException("Exception thrown when connecting", ex);
-			}
-		}
-	}
+    private final CommonEncoder encoder;
 
-	@Override
-	public void channelInactive(ChannelHandlerContext ctx) {
-		try {
-			Channel c = ctx.channel();
-			Session session = this.session.get();
+    public CommonHandler(CommonEncoder encoder, CommonDecoder decoder) {
+        if (Spout.getPlatform() == Platform.CLIENT) {
+            this.engine = (Client) Spout.getEngine();
+            this.onClient = true;
+        } else {
+            this.engine = (Server) Spout.getEngine();
+            this.onClient = false;
+        }
+        this.encoder = encoder;
+        this.decoder = decoder;
+    }
 
-			if (!onClient) {
-				Server server = (Server) engine;
-				server.getChannelGroup().remove(c);
-				server.getSessionRegistry().remove(session);
-			}
+    @Override
+    public void channelActive(ChannelHandlerContext ctx) {
+        final Channel c = ctx.channel();
+        if (onClient) {
+            engine.getLogger().info("Upstream channel connected: " + c + ".");
+        } else {
+            try {
+                Server server = (Server) engine;
+                server.getChannelGroup().add(c);
+                Session session = server.newSession(c);
+                server.getSessionRegistry().add(session);
+                setSession(session);
+            } catch (Exception ex) {
+                ex.printStackTrace();
+                throw new RuntimeException("Exception thrown when connecting", ex);
+            }
+        }
+    }
 
-			if (session.isPrimary(c)) {
-				session.dispose();
-			}
-		} catch (Exception ex) {
-			ex.printStackTrace();
-			throw new RuntimeException("Exception thrown when disconnecting", ex);
-		}
-	}
+    @Override
+    public void channelInactive(ChannelHandlerContext ctx) {
+        try {
+            Channel c = ctx.channel();
+            Session session = this.session.get();
+            if (!onClient) {
+                Server server = (Server) engine;
+                server.getChannelGroup().remove(c);
+                server.getSessionRegistry().remove(session);
+            }
+            if (session.isPrimary(c)) {
+                session.dispose();
+            }
+        } catch (Exception ex) {
+            throw new RuntimeException("Exception thrown when disconnecting", ex);
+        }
+    }
 
-	@Override
-	protected void channelRead0(ChannelHandlerContext ctx, Message i){
-		Session session = this.session.get();
-		if (session.isPrimary(ctx.channel())) {
-			session.messageReceived(i);
-		} else {
-			session.messageReceivedOnAuxChannel(ctx.channel(), i);
-		}
-	}
+    @Override
+    protected void channelRead0(ChannelHandlerContext ctx, Message i) {
+        Session session = this.session.get();
+        if (session.isPrimary(ctx.channel())) {
+            session.messageReceived(i);
+        } else {
+            session.messageReceivedOnAuxChannel(ctx.channel(), i);
+        }
+    }
 
-	@Override
-	public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
-		Channel c = ctx.channel();
-		if (c.isOpen()) {
-			Session session = this.session.get();
+    @Override
+    public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
+        Channel c = ctx.channel();
+        if (c.isActive()) {
+            engine.getLogger().log(Level.WARNING, "Exception caught, closing channel: " + c + "...", cause);
+            c.close();
+        }
+    }
 
-			if (!onClient) {
-				Server server = (Server) engine;
-				server.getChannelGroup().remove(c);
-				server.getSessionRegistry().remove(session);
-			}
+    public Session getSession() {
+        return this.session.get();
+    }
 
-			if (session.isPrimary(c)) {
-				session.dispose();
-			}
-			engine.getLogger().log(Level.WARNING, "Exception caught, closing channel: " + c + "...", cause);
-			c.close();
-		}
-	}
-
-	public Session getSession() {
-		return this.session.get();
-	}
-
-	public void setSession(Session session) {
-		if (!this.session.compareAndSet(null, session)) {
-			throw new IllegalStateException("Session may not be set more than once");
-		}
-		decoder.setProtocol(session.getProtocol());
-		encoder.setProtocol(session.getProtocol());
-	}
+    public void setSession(Session session) {
+        if (!this.session.compareAndSet(null, session)) {
+            throw new IllegalStateException("Session may not be set more than once");
+        }
+        decoder.setProtocol(session.getProtocol());
+        encoder.setProtocol(session.getProtocol());
+    }
 }
